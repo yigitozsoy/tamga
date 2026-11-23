@@ -1,0 +1,31 @@
+# tamga — Claude için proje notları
+
+**tamga**: Yiğit Özsoy'un Windows uygulama ailesinin (erk, bediz, kamug, yazıt) başlatıcısı. PyQt6, yalnızca Windows 10/11 64-bit.
+Kullanıcıyla çalışma tarzı (Türkçe, sade varsayılanlar, gri vurgu, mor yok, eski adlar gamma/alpha/beta/delta hiçbir yerde
+görünmesin, derleme/commit/push yalnızca istenince) kamug'un CLAUDE.md'siyle aynı: `..\kamug\CLAUDE.md` bölüm 2.
+
+## Yapı
+```
+main.py               kaynaktan başlatıcı
+tamga/app.py          tek örnek (QLocalServer "tamga-launcher-<kullanıcı>")
+tamga/window.py       kartlar (kur / aç / güncelle), ortak ayarlar, indirme + Inno kurulumu (/SILENT /CLOSEAPPLICATIONS)
+tamga/apps.py         katalog (AppId, repo, exe, tercih dosyası), kurulu algılama, çalışan süreçler
+tamga/github.py       Releases API (kimliksiz), kurulum dosyası seçimi (.exe, x64/setup, arm64 değil), indirme
+tamga/shared.py       ortak anahtarları uygulamaların tercih dosyasına yazar
+tamga/palette.py      yazıt/erk/kamug ile birebir aynı tema çeşitleri ve vurgular (yazıt theme.py'den kopya)
+sync/tamga_sync.py    kamug/erk/yazıt içindeki tamga_sync.py'nin ana kopyası (smoke test eşliği denetler)
+packaging/            build.ps1, tamga.spec, installer.iss (AppId {FB53E9DE-E7AE-4660-8910-541D2D3F23BF}), make_meta.py, make_logo.py
+```
+
+## Bilinen tuzaklar
+- Ortak anahtarlar: `theme` (çeşit kimliği), `dark_variant`, `light_variant`, `accent` (ad ya da #hex), `language`.
+  Uygulamalar tercihleri bellekte tutar ve her `set`'te tüm dosyayı yazar; bu yüzden açık uygulama dosyayı
+  `tamga_sync` (klasör izleyici, 200 ms) ile yeniden okur, yoksa tamga'nın yazdığını ezerdi. Dil yeniden başlatınca.
+- tamga tercih dosyası olmayan uygulamaya yazmaz (kamug'un gamma → kamug klasör taşıması bozulmasın).
+- bediz .NET: aynı tema çeşitleri / vurgular `%APPDATA%\bediz\settings.json` içinde `betaMonitorTheme` /
+  `betaMonitorAccent` adıyla (dil yok). Canlı yenilemez ve açıkken kendi kaydıyla ezer: yalnızca kapalıyken yazılır
+  (`App.live=False`; pencere 3 sn'lik yoklamada bediz kapanınca uygular).
+- erk deposu özel: Releases API 404 → "GitHub'da yayın yok".
+- Kayıt defteri: Claude masaüstü ve Python install manager MSIX; kaynaktan çalışırken başlatılan kurulumlar
+  sanal kayıt defterine yazabilir. Gerçek denetim için `Invoke-CimMethod Win32_Process Create`. Kurulu tamga.exe'de sorun yok.
+- Test: `python tests/smoke_test.py` (LOCALAPPDATA ve TAMGA_DATA_DIR geçici klasöre, ağ sahte, pencere ekranda değil).
