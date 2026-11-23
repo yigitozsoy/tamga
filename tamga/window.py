@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QFrame
                              QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                              QVBoxLayout, QWidget)
 
+from . import REPO, __version__
 from . import apps as A
 from . import github, shared, theme
 from .config import DOWNLOAD_DIR, asset, prefs
@@ -17,6 +18,7 @@ from .i18n import is_tr, t
 from .palette import ACCENTS, VARIANTS
 
 CHECK_EVERY = 3600          # GitHub'a en fazla saatte bir (elle denetim hariç)
+SELF = "tamga"              # tamga'nın kendi sürüm kaydı (self.rel / self.jobs anahtarı)
 
 
 class Bus(QObject):
@@ -227,6 +229,7 @@ class MainWindow(QMainWindow):
         self._status_msg = ""
 
         shared.seed()
+        self._clean_downloads()
         self.scan()
         self.build()
         geo = prefs.get("window_geometry")
@@ -295,6 +298,15 @@ class MainWindow(QMainWindow):
         title = QLabel("tamga")
         title.setObjectName("Title")
         head.addWidget(title)
+        self.lbl_ver = QLabel()
+        self.lbl_ver.setObjectName("Status")
+        head.addWidget(self.lbl_ver, 0, Qt.AlignmentFlag.AlignBottom)
+        head.addSpacing(4)
+        self.btn_self = QPushButton()
+        self.btn_self.setObjectName("Primary")
+        self.btn_self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_self.clicked.connect(self.update_self)
+        head.addWidget(self.btn_self)
         head.addStretch(1)
         self.btn_check = QPushButton(t("checking") if self._checking else t("check"))
         self.btn_check.setEnabled(not self._checking)
@@ -315,6 +327,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._section(t("shared")))
         lay.addWidget(self._settings_card())
         lay.addStretch(1)
+        self._refresh_self()
         old = self.centralWidget()
         self.setCentralWidget(root)
         if old:
@@ -477,6 +490,7 @@ class MainWindow(QMainWindow):
         self.btn_check.setText(t("checking"))
 
         def work():
+            self.bus.release.emit(SELF, github.latest(REPO))
             for a in A.APPS:
                 self.bus.release.emit(a.id, github.latest(a.repo))
             self.bus.check_done.emit()
@@ -486,7 +500,9 @@ class MainWindow(QMainWindow):
         if info.get("error") in ("net", "rate") and self.rel.get(aid, {}).get("version"):
             info = dict(self.rel[aid], error=info["error"])     # eski bilgiyi koru
         self.rel[aid] = info
-        if aid in self.cards:
+        if aid == SELF:
+            self._refresh_self()
+        elif aid in self.cards:
             self.cards[aid].refresh()
 
     def _on_check_done(self):
@@ -538,9 +554,77 @@ class MainWindow(QMainWindow):
         job = self.jobs.get(aid)
         if job:
             job["p"] = int(got * 1000 / total) if total else -1
-            self.cards[aid].refresh()
+            if aid == SELF:
+                self._refresh_self()
+            else:
+                self.cards[aid].refresh()
+
+    # -- tamga'nın kendisi
+    def _self_newer(self):
+        rv = (self.rel.get(SELF) or {}).get("version", "")
+        return rv if rv and A.is_newer(rv, __version__) else ""
+
+    def _refresh_self(self):
+        """Başlıkta sürüm numarası; yeni sürüm varsa yanında Güncelle düğmesi."""
+        try:
+            rv, job = self._self_newer(), self.jobs.get(SELF)
+            self.lbl_ver.setText(__version__ + ("  ·  " + t("new_v", v=rv) if rv else ""))
+            self.lbl_ver.setProperty("state", "new" if rv else "")
+            self.lbl_ver.style().unpolish(self.lbl_ver)
+            self.lbl_ver.style().polish(self.lbl_ver)
+            can = bool(rv and (self.rel.get(SELF) or {}).get("asset_url"))
+            self.btn_self.setVisible(can or bool(job))
+            self.btn_self.setEnabled(not job)
+            if job and job["phase"] == "download":
+                pct = f"%{job['p'] // 10}" if is_tr() else f"{job['p'] // 10}%"
+                self.btn_self.setText(t("downloading", p=pct if job["p"] >= 0 else ""))
+            elif job:
+                self.btn_self.setText(t("installing"))
+            else:
+                self.btn_self.setText(t("update"))
+        except RuntimeError:          # pencere yeniden kuruluyor
+            pass
+
+    def update_self(self):
+        """Yeni tamga kurulumunu indir, sessizce kur; tamga kapanır, kurulum bitince yeniden açılır."""
+        rel = self.rel.get(SELF) or {}
+        url = rel.get("asset_url")
+        if not url or SELF in self.jobs:
+            return
+        dest = os.path.join(DOWNLOAD_DIR, os.path.basename(rel.get("asset_name") or "tamga-setup.exe"))
+        self.jobs[SELF] = {"phase": "download", "p": -1}
+        self._refresh_self()
+
+        def work():
+            try:
+                github.download(url, dest, lambda g, n: self.bus.progress.emit(SELF, g, n))
+                self.bus.downloaded.emit(SELF, dest)
+            except Exception as e:
+                self.bus.failed.emit(SELF, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clean_downloads(self):
+        """Önceki kendini güncellemeden kalan kurulum dosyaları."""
+        try:
+            for n in os.listdir(DOWNLOAD_DIR):
+                if n.lower().startswith("tamga") and n.lower().endswith((".exe", ".part")):
+                    os.remove(os.path.join(DOWNLOAD_DIR, n))
+        except OSError:
+            pass
 
     def _on_downloaded(self, aid, path):
+        if aid == SELF:
+            # /relaunch=1: kurulum bitince tamga'yı yeniden açar (installer.iss [Run])
+            args = [path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/relaunch=1"]
+            try:
+                subprocess.Popen(args, close_fds=True, creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x8))
+            except OSError as e:
+                self._on_failed(aid, str(e))
+                return
+            self.jobs[SELF] = {"phase": "install", "p": 1000}
+            self._refresh_self()
+            QTimer.singleShot(400, QApplication.instance().quit)   # dosyalar kilitli kalmasın
+            return
         # Inno Setup: sihirbazsız, ilerleme penceresiyle; açık uygulamayı kapatıp sonra yeniden açar
         args = [path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]
         try:
@@ -571,6 +655,10 @@ class MainWindow(QMainWindow):
     def _on_failed(self, aid, _msg):
         self.jobs.pop(aid, None)
         self._cancel.discard(aid)
+        if aid == SELF:
+            self._refresh_self()
+            self.lbl_ver.setText(self.lbl_ver.text() + "  ·  " + t("dl_failed"))
+            return
         self.cards[aid].refresh()
         self._show_card_error(aid, t("dl_failed"))
 
