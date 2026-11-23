@@ -66,6 +66,16 @@ def parse_version(s):
     return tuple(nums + [0] * (3 - len(nums)))
 
 
+def short(v):
+    """Ailenin sürüm biçimi: iki parça ("3.1.0" -> "3.1"); sıfır olmayan üçüncü parça kalır."""
+    nums = [int(x) for x in re.findall(r"\d+", v or "")[:3]]
+    if not nums:
+        return v or ""
+    while len(nums) > 2 and nums[-1] == 0:
+        nums.pop()
+    return ".".join(map(str, nums + [0] * (2 - len(nums))))
+
+
 def is_newer(remote, local):
     return bool(remote) and parse_version(remote) > parse_version(local)
 
@@ -88,7 +98,7 @@ def _reg_values(guid):
 
 
 def file_version(path):
-    """exe'nin sürüm kaynağından "1.2.3" (yoksa "")."""
+    """exe'nin sürüm kaynağından "1.2" / "1.2.3" (yoksa "")."""
     try:
         ver = ctypes.WinDLL("version")
         size = ver.GetFileVersionInfoSizeW(path, None)
@@ -106,7 +116,7 @@ def file_version(path):
             _fields_ = [(f, wintypes.DWORD) for f in (
                 "sig", "struc", "fvms", "fvls", "pvms", "pvls", "mask", "flags", "os", "type", "sub", "dms", "dls")]
         fi = ctypes.cast(p, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
-        return f"{fi.pvms >> 16}.{fi.pvms & 0xFFFF}.{fi.pvls >> 16}"
+        return short(f"{fi.pvms >> 16}.{fi.pvms & 0xFFFF}.{fi.pvls >> 16}")
     except Exception:
         return ""
 
@@ -121,7 +131,7 @@ def installed(app):
         if not os.path.isfile(exe):
             return None
         reg = {}                       # kayıt başka bir yeri gösteriyordu: güvenme
-    version = reg.get("DisplayVersion") or file_version(exe)
+    version = short(reg.get("DisplayVersion") or file_version(exe))
     return Installed(version=version, exe=exe, location=os.path.dirname(exe),
                      uninstall=reg.get("UninstallString", ""))
 

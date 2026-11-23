@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 
 from . import __version__
+from . import apps as A
 
 UA = f"tamga/{__version__}"
 
@@ -42,7 +43,7 @@ def latest(repo):
     m = re.search(r"\d+(?:\.\d+){0,2}", tag)
     a = pick_asset(data.get("assets"))
     return {
-        "version": m.group(0) if m else "",
+        "version": A.short(m.group(0)) if m else "",
         "page": str(data.get("html_url", f"https://github.com/{repo}/releases/latest")),
         "asset_url": a.get("browser_download_url", "") if a else "",
         "asset_name": a.get("name", "") if a else "",

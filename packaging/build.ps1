@@ -22,7 +22,7 @@ function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 if ($InstallDeps) {
     Step "Bağımlılıklar kuruluyor"
     & $Python -m pip install --upgrade pip
-    & $Python -m pip install -r requirements.txt pyinstaller
+    & $Python -m pip install -r requirements.txt pyinstaller pillow
     if ($LASTEXITCODE -ne 0) { throw "pip install başarısız" }
 }
 

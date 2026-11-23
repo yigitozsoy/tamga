@@ -13,6 +13,7 @@ os.environ["TAMGA_DATA_DIR"] = os.path.join(TMP, "tamga")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import tamga  # noqa: E402
 from tamga import apps as A, github, shared  # noqa: E402
 from tamga.config import prefs  # noqa: E402
 
@@ -90,12 +91,13 @@ if "--no-gui" not in sys.argv:
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     fake = {
-        "kamug": {"version": "3.1.0", "page": "p", "asset_url": "u", "asset_name": "kamug-setup-3.1.0.exe"},
+        "tamga": {"version": "9.9", "page": "p", "asset_url": "u", "asset_name": "tamga-setup-9.9.exe"},
+        "kamug": {"version": "9.1", "page": "p", "asset_url": "u", "asset_name": "kamug-setup-9.1.exe"},
         "erk": {"error": "none"},
-        "yazit": {"version": "3.0.0", "page": "p", "asset_url": "u", "asset_name": "yazit-setup-3.0.0.exe"},
+        "yazit": {"version": "3.0", "page": "p", "asset_url": "u", "asset_name": "yazit-setup-3.0.exe"},
         "bediz": {"error": "net"},
     }
-    github.latest = lambda repo: dict(fake[next(a.id for a in A.APPS if a.repo == repo)])
+    github.latest = lambda repo: dict(fake[next((a.id for a in A.APPS if a.repo == repo), "tamga")])
     prefs.set("releases_checked", 0)
     from tamga.window import MainWindow
     w = MainWindow()
@@ -110,11 +112,15 @@ if "--no-gui" not in sys.argv:
     app.processEvents()
     c = w.cards
     check("kamug: güncelle düğmesi", c["kamug"].btn_act.isVisible() and c["kamug"].btn_act.text() == "Güncelle")
-    check("kamug: yeni sürüm yazısı", "3.1.0" in c["kamug"].status.text())
+    check("kamug: yeni sürüm yazısı", "9.1" in c["kamug"].status.text())
+    check("tamga: kendi sürümü ve güncelle düğmesi", w.lbl_ver.text().startswith(tamga.__version__)
+          and "9.9" in w.lbl_ver.text() and w.btn_self.isVisible())
+    check("sürümler iki parça", A.short("3.1.0") == "3.1" and A.short("2.1.1") == "2.1.1"
+          and not A.is_newer("1.1", "1.1.0"))
     check("yazıt: kur düğmesi", c["yazit"].btn_act.isVisible() and c["yazit"].btn_act.text() == "Kur"
           and not c["yazit"].btn_open.isVisible())
     check("erk: yayın yok", "yayın yok" in c["erk"].status.text() and not c["erk"].btn_act.isVisible())
-    check("sürüm bilgisi önbelleğe yazılır", prefs.get("releases", {}).get("kamug", {}).get("version") == "3.1.0")
+    check("sürüm bilgisi önbelleğe yazılır", prefs.get("releases", {}).get("kamug", {}).get("version") == "9.1")
 
     # kurulum bitişi (sahte süreç)
     class P:
