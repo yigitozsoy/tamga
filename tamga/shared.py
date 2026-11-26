@@ -1,6 +1,6 @@
 """Ortak ayarlar (tema, vurgu rengi, dil): her uygulamanın kendi tercih dosyasına yazılır.
 
-kamug, erk ve yazıt aynı anahtarları kullanır:
+kamug, erk, yazıt ve mergen aynı anahtarları kullanır:
   theme          tema çeşidi (amoled, dark_gray, graphite, midnight, mocha, white, light_gray, cream, ice, mint)
   dark_variant / light_variant   ailenin son seçilen çeşidi (tema düğmesi bununla geçiş yapar)
   accent         hazır ad (gray, red, blue …) ya da #rrggbb
@@ -50,7 +50,14 @@ def normalize(v):
 
 
 def seed():
-    """İlk açılış: ortak ayarları ailenin mevcut tercihlerinden al (önce kamug, sonra yazıt, erk)."""
+    """İlk açılış: ortak ayarları ailenin mevcut tercihlerinden al (önce kamug, sonra yazıt, erk). Aileye sonradan
+    katılan uygulama (ör. mergen) bir kez "Uygulanacaklar" listesine eklenir."""
+    seen = prefs.get("sync_seen") or ["kamug", "erk", "yazit", "bediz"]
+    new = [a.id for a in APPS if a.shares_theme and a.id not in seen]
+    if new:
+        prefs.set("sync_apps", list(prefs.get("sync_apps") or []) + [x for x in new if x not in (prefs.get("sync_apps") or [])])
+    if new or not prefs.get("sync_seen"):
+        prefs.set("sync_seen", [a.id for a in APPS])
     if prefs.get("seeded"):
         return
     for aid in ("kamug", "yazit", "erk"):

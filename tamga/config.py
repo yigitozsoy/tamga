@@ -28,7 +28,7 @@ DEFAULTS = {
     "dark_variant": "amoled",
     "light_variant": "white",
     "accent": "gray",
-    "sync_apps": ["kamug", "erk", "yazit", "bediz"],
+    "sync_apps": ["kamug", "erk", "yazit", "bediz", "mergen"],
     "seeded": False,
     "releases": {},          # uygulama -> son GitHub sürüm bilgisi (önbellek)
     "releases_checked": 0,

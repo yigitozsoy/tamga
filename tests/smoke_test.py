@@ -80,7 +80,7 @@ check("bediz: tema + vurgu, dil / çeşit anahtarı yok, diğerleri korunur", d[
 
 src = open(os.path.join(ROOT, "sync", "tamga_sync.py"), encoding="utf-8").read()
 desk = os.path.dirname(ROOT)
-for rel in (r"kamug\kamug", r"erk\erk", r"yazıt\yazit"):
+for rel in (r"kamug\kamug", r"erk\erk", r"yazıt\yazit", r"mergen\mergen"):
     p = os.path.join(desk, rel, "tamga_sync.py")
     if os.path.isfile(p):
         check(f"tamga_sync eş: {rel}", open(p, encoding="utf-8").read() == src)
@@ -96,6 +96,7 @@ if "--no-gui" not in sys.argv:
         "erk": {"error": "none"},
         "yazit": {"version": "3.0", "page": "p", "asset_url": "u", "asset_name": "yazit-setup-3.0.exe"},
         "bediz": {"error": "net"},
+        "mergen": {"version": "0.2", "page": "p", "asset_url": "u", "asset_name": "mergen-setup-0.2.exe"},
     }
     github.latest = lambda repo: dict(fake[next((a.id for a in A.APPS if a.repo == repo), "tamga")])
     prefs.set("releases_checked", 0)

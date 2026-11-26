@@ -49,6 +49,9 @@ APPS = [
         [os.path.join(ROAMING, "bediz", "settings.json")],
         # bediz (.NET) aynı tema çeşitlerini ve vurguları kullanır, anahtar adları eski addan kalma; dil ayarı yok
         key_map={"theme": "betaMonitorTheme", "accent": "betaMonitorAccent"}, live=False, indent=2),
+    App("mergen", "mergen", ("Sistem bilgisi ve görev yöneticisi", "System info and task manager"),
+        "yigitozsoy/mergen_sistem", "{98384CE8-F966-4B98-BEB8-3AFB0064834E}", "mergen", "mergen.exe",
+        [os.path.join(LOCAL, "mergen", "preferences.json")]),
 ]
 BY_ID = {a.id: a for a in APPS}
 
