@@ -11,7 +11,9 @@ tamga/app.py          tek örnek (QLocalServer "tamga-launcher-<kullanıcı>")
 tamga/window.py       kartlar (kur / aç / güncelle), ortak ayarlar, indirme + Inno kurulumu (/SILENT /CLOSEAPPLICATIONS)
 tamga/apps.py         katalog (AppId, repo, exe, tercih dosyası), kurulu algılama, çalışan süreçler
 tamga/github.py       Releases API (kimliksiz), kurulum dosyası seçimi (.exe, x64/setup, arm64 değil), indirme
-tamga/winget.py       "Diğer uygulamalar" sekmesi: `winget upgrade` tablosunu konumla okur (başlık dile göre değişir), sırayla sessiz güncelleme
+tamga/winget.py       "Diğer uygulamalar" sekmesi: `winget upgrade` tablosunu konumla okur (başlık dile göre değişir), sırayla sessiz güncelleme,
+                      önerilenler (RECOMMENDED: Microsoft.* + güvenlik), simge (kaldırma kaydı DisplayIcon / InstallLocation),
+                      boyut (`winget show` SHA256 üstündeki adres + HEAD), indirme ilerlemesi (%TEMP%\WinGet\<id>.<sürüm>, os.stat)
 tamga/shared.py       ortak anahtarları uygulamaların tercih dosyasına yazar
 tamga/palette.py      yazıt/erk/kamug ile birebir aynı tema çeşitleri ve vurgular (yazıt theme.py'den kopya)
 sync/tamga_sync.py    kamug/erk/yazıt içindeki tamga_sync.py'nin ana kopyası (smoke test eşliği denetler)
@@ -29,4 +31,7 @@ packaging/            build.ps1, tamga.spec, installer.iss (AppId {FB53E9DE-E7AE
 - erk deposu özel: Releases API 404 → "GitHub'da yayın yok".
 - Kayıt defteri: Claude masaüstü ve Python install manager MSIX; kaynaktan çalışırken başlatılan kurulumlar
   sanal kayıt defterine yazabilir. Gerçek denetim için `Invoke-CimMethod Win32_Process Create`. Kurulu tamga.exe'de sorun yok.
+- winget çıktısı yönlendirilince ilerleme çubuğu / yüzde YAZMAZ: aşama satırlardan ("Downloading https://…" sonra
+  doğrulama), yüzde geçici klasördeki dosyanın boyutundan. Dizin kaydı yazılırken güncellenmez: `scandir` değil `os.stat`.
+- Sürüm notu: build.yml etiketlenen commit'in mesajını yayın gövdesi yapar; commit mesajını sürüm notu gibi yaz.
 - Test: `python tests/smoke_test.py` (LOCALAPPDATA ve TAMGA_DATA_DIR geçici klasöre, ağ sahte, pencere ekranda değil).

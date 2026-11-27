@@ -48,7 +48,19 @@ def latest(repo):
         "asset_url": a.get("browser_download_url", "") if a else "",
         "asset_name": a.get("name", "") if a else "",
         "size": int(a.get("size", 0) or 0) if a else 0,
+        "notes": clean_notes(data.get("body")),
     }
+
+
+def clean_notes(body, limit=4000):
+    """Sürüm notları (Markdown): GitHub'ın kendiliğinden eklediği "Full Changelog" / imza satırları atılır;
+    geriye bir şey kalmazsa ""."""
+    keep = [ln for ln in str(body or "").replace("\r\n", "\n").split("\n")
+            if not re.search(r"Full Changelog|Co-Authored-By|Generated with \[Claude", ln, re.I)]
+    text = "\n".join(keep).strip()
+    if not re.sub(r"(?m)^#+.*$", "", text).strip():       # yalnızca başlık ("## What's Changed") kaldıysa
+        return ""
+    return text if len(text) <= limit else text[:limit].rsplit("\n", 1)[0] + "\n\n…"
 
 
 def download(url, dest, progress=None, cancelled=lambda: False):

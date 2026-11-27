@@ -31,9 +31,16 @@ jobs:
           name: tamga-windows
           path: build/installer/*
 
+      # sürüm notu: etiketlenen commit'in mesajı (tamga'nın "Yenilikler" düğmesi bunu gösterir)
+      - name: Sürüm notları
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: git log -1 --format=%B | grep -v "Co-Authored-By" > notes.md
+
       - name: Sürüm yayınla
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build/installer/*
+          body_path: notes.md
           generate_release_notes: true

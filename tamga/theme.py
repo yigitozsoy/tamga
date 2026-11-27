@@ -67,6 +67,11 @@ def tinted(path, height, dpr=1.0, col=None):
     return out
 
 
+def _light(hexcol):
+    q = qcolor(hexcol)
+    return 0.299 * q.red() + 0.587 * q.green() + 0.114 * q.blue() > 150
+
+
 def stylesheet():
     c = pal()
     acc = accent()
@@ -101,6 +106,12 @@ QPushButton#Chip:checked {{ background: {c['chip_active_bg']}; color: {c['chip_a
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 2px solid {c['text3']}; }}
 QCheckBox::indicator:checked {{ background: {acc}; border-color: {acc}; }}
+#Badge {{ background: {acc}; color: {'#000000' if _light(acc) else '#ffffff'}; border-radius: 8px;
+          padding: 1px 8px; font-size: 8.5pt; font-weight: 600; }}
+#Notes {{ color: {c['text2']}; padding-top: 6px; }}
+QMenu {{ background: {c['card']}; border: 1px solid {c['divider']}; border-radius: 8px; padding: 4px; }}
+QMenu::item {{ padding: 7px 16px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {c['surface_hover']}; }}
 QProgressBar {{ background: {c['surface']}; border: none; border-radius: 2px; max-height: 4px; }}
 QProgressBar::chunk {{ background: {acc}; border-radius: 2px; }}
 """
