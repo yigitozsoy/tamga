@@ -83,6 +83,8 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
 #Section {{ font-size: 12pt; font-weight: 600; }}
 #Card {{ background: {c['card']}; border: 1px solid {c['divider']}; border-radius: 12px; }}
 #AppName {{ font-size: 12pt; font-weight: 600; }}
+#RowName {{ font-size: 10.5pt; font-weight: 600; }}
+#Divider {{ background: {c['divider']}; border: none; max-height: 1px; min-height: 1px; }}
 #Status {{ color: {c['text2']}; }}
 #Status[state="new"] {{ color: {c['text']}; font-weight: 600; }}
 #Status[state="err"] {{ color: {c['text3']}; }}

@@ -78,6 +78,28 @@ d = json.load(open(bp, encoding="utf-8"))
 check("bediz: tema + vurgu, dil / çeşit anahtarı yok, diğerleri korunur", d["betaMonitorTheme"] == "cream"
       and d["betaMonitorAccent"] == "teal" and "theme" not in d and "language" not in d and d["printers"] == [])
 
+# winget tablosu (İngilizce ve Türkçe başlık, dönen çubuk, ikinci tablo)
+from tamga import winget as W  # noqa: E402
+WG_EN = ("   - \r   \\ \r\r"
+         "Name                       Id                Version       Available     Source\r\n"
+         "--------------------------------------------------------------------------------\r\n"
+         "Discord                    Discord.Discord   1.0.9200      1.0.9210      winget\r\n"
+         "Zoom Workplace             Zoom.Zoom.EXE     7.1.9 (48550) 7.2.5 (51704) winget\r\n"
+         "2 upgrades available.\r\n\r\n"
+         "The following packages have an upgrade available, but require explicit targeting for upgrade:\r\n"
+         "Name   Id        Version Available Source\r\n"
+         "-----------------------------------------\r\n"
+         "Pinned Pin.Ned   1.0     2.0       winget\r\n")
+r = W.parse_upgrades(WG_EN)
+check("winget: tablo okunur", [x["id"] for x in r] == ["Discord.Discord", "Zoom.Zoom.EXE"]
+      and r[1]["version"] == "7.1.9 (48550)" and r[1]["available"] == "7.2.5 (51704)" and r[0]["name"] == "Discord")
+WG_TR = ("Ad            Kimlik            Sürüm    Kullanılabilir Kaynak\n"
+         "--------------------------------------------------------------\n"
+         "Google Chrome Google.Chrome.EXE 131.0.1  132.0.2        winget\n")
+r = W.parse_upgrades(WG_TR)
+check("winget: Türkçe başlık", len(r) == 1 and r[0]["id"] == "Google.Chrome.EXE" and r[0]["available"] == "132.0.2")
+check("winget: güncelleme yoksa boş", W.parse_upgrades("No installed package found matching input criteria.") == [])
+
 src = open(os.path.join(ROOT, "sync", "tamga_sync.py"), encoding="utf-8").read()
 desk = os.path.dirname(ROOT)
 for rel in (r"kamug\kamug", r"erk\erk", r"yazıt\yazit", r"mergen\mergen"):
@@ -100,6 +122,16 @@ if "--no-gui" not in sys.argv:
     }
     github.latest = lambda repo: dict(fake[next((a.id for a in A.APPS if a.repo == repo), "tamga")])
     prefs.set("releases_checked", 0)
+    wg_fake = [{"name": "Discord", "id": "Discord.Discord", "version": "1.0", "available": "1.1", "source": "winget"},
+               {"name": "Steam", "id": "Valve.Steam", "version": "2.0", "available": "2.1", "source": "winget"}]
+    W.list_upgrades = lambda: ([dict(x) for x in wg_fake], "")
+    wg_calls = []
+
+    def fake_upgrade(pid, on_pct=None):
+        wg_calls.append(pid)
+        on_pct and on_pct(50)
+        return 0 if pid == "Discord.Discord" else 1
+    W.upgrade = fake_upgrade
     from tamga.window import MainWindow
     w = MainWindow()
     w.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
@@ -133,6 +165,29 @@ if "--no-gui" not in sys.argv:
     w._procs["kamug"] = (P(), fakefile)
     w._check_installers()
     check("kurulum bitince iş temizlenir, dosya silinir", "kamug" not in w.jobs and not os.path.exists(fakefile))
+
+    # diğer uygulamalar sekmesi (winget sahte)
+    w.set_tab(1)
+    check("sekme 2 açılır ve hatırlanır", w.stack.currentIndex() == 1 and prefs.get("tab") == 1)
+    w.check_other()
+    end = time.time() + 5
+    while w._wg_checking and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    app.processEvents()
+    check("winget: satırlar ve sayaç", set(w.wg_rows) == {"Discord.Discord", "Valve.Steam"}
+          and "2" in w.tabs[1].text() and w.btn_all.isVisible() and "2 güncelleme" in w.wg_status.text())
+    w.update_all()
+    end = time.time() + 5
+    while (w.wg_jobs or w._wg_worker) and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    app.processEvents()
+    check("winget: sırayla güncellenir", wg_calls == ["Discord.Discord", "Valve.Steam"])
+    check("winget: başarılı satır kalkar, başarısız hata gösterir", list(w.wg_rows) == ["Valve.Steam"]
+          and "Güncellenemedi" in w.wg_rows["Valve.Steam"].status.text()
+          and [x["id"] for x in prefs.get("wg_upgrades")] == ["Valve.Steam"])
+    w.set_tab(0)
 
     prefs.set("sync_apps", ["kamug"])
     w.set_shared(theme="midnight")

@@ -8,11 +8,12 @@ from PyQt6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QFrame, QGridLayout,
                              QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-                             QVBoxLayout, QWidget)
+                             QStackedWidget, QVBoxLayout, QWidget)
 
 from . import REPO, __version__
 from . import apps as A
 from . import github, shared, theme
+from . import winget as W
 from .config import DOWNLOAD_DIR, asset, prefs
 from .i18n import is_tr, t
 from .palette import ACCENTS, VARIANTS
@@ -28,6 +29,23 @@ class Bus(QObject):
     progress = pyqtSignal(str, int, int)
     downloaded = pyqtSignal(str, str)
     failed = pyqtSignal(str, str)
+    wg_list = pyqtSignal(list, str)
+    wg_pct = pyqtSignal(str, int)
+    wg_done = pyqtSignal(str, int)
+
+
+WG_OK = (0, -1978335189)    # 0x8A15002B: uygulanabilir güncelleme yok (zaten güncel / daha yeni)
+
+
+def ago(ts):
+    s = max(0, time.time() - ts)
+    if s < 60:
+        return t("just_now")
+    if s < 3600:
+        return t("min_ago", n=int(s // 60))
+    if s < 86400:
+        return t("hour_ago", n=int(s // 3600))
+    return t("day_ago", n=int(s // 86400))
 
 
 # --- küçük parçalar ----------------------------------------------------------
@@ -207,6 +225,66 @@ class AppCard(QFrame):
         self.btn_open.setEnabled(not job)
 
 
+class WgRow(QWidget):
+    """Diğer uygulamalar sekmesinde winget'in bildirdiği tek güncelleme."""
+
+    def __init__(self, item, win):
+        super().__init__()
+        self.item = item
+        self.win = win
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(20, 10, 14, 10)
+        lay.setSpacing(14)
+        mid = QVBoxLayout()
+        mid.setSpacing(1)
+        name = QLabel(item["name"])
+        name.setObjectName("RowName")
+        name.setToolTip(item["id"])
+        mid.addWidget(name)
+        self.status = QLabel()
+        self.status.setObjectName("Status")
+        self.status.setWordWrap(True)
+        mid.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setRange(0, 100)
+        self.bar.hide()
+        mid.addWidget(self.bar)
+        lay.addLayout(mid, 1)
+        self.btn = QPushButton(t("update"))
+        self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn.clicked.connect(lambda: self.win.update_pkg(item["id"]))
+        lay.addWidget(self.btn)
+        self.refresh()
+
+    def refresh(self):
+        pid, it = self.item["id"], self.item
+        job = self.win.wg_jobs.get(pid)
+        text = t("wg_ver", v=it.get("version") or "?", n=it.get("available") or "?")
+        state = ""
+        if pid in self.win.wg_failed:
+            text += "  ·  " + t("wg_failed")
+            state = "err"
+        self.status.setText(text)
+        self.status.setProperty("state", state)
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+        if job:
+            self.btn.setEnabled(False)
+            if job["phase"] == "queued":
+                self.btn.setText(t("wg_queued"))
+                self.bar.hide()
+            else:
+                p = job["p"]
+                self.btn.setText(t("wg_updating", p=(f"%{p}" if is_tr() else f"{p}%") if p >= 0 else ""))
+                self.bar.setVisible(p >= 0)
+                self.bar.setValue(max(0, p))
+        else:
+            self.btn.setEnabled(True)
+            self.btn.setText(t("update"))
+            self.bar.hide()
+
+
 # --- ana pencere -------------------------------------------------------------
 
 class MainWindow(QMainWindow):
@@ -221,12 +299,22 @@ class MainWindow(QMainWindow):
         self.bus.progress.connect(self._on_progress)
         self.bus.downloaded.connect(self._on_downloaded)
         self.bus.failed.connect(self._on_failed)
+        self.bus.wg_list.connect(self._on_wg_list)
+        self.bus.wg_pct.connect(self._on_wg_pct)
+        self.bus.wg_done.connect(self._on_wg_done)
         self.inst, self.running, self.jobs, self.cards = {}, set(), {}, {}
         self.rel = dict(prefs.get("releases") or {})
         self._checking = False
         self._procs = {}
         self._cancel = set()
         self._status_msg = ""
+        # diğer uygulamalar (winget)
+        self.tab = 1 if prefs.get("tab") == 1 else 0
+        self.wg = [x for x in (prefs.get("wg_upgrades") or []) if isinstance(x, dict) and x.get("id")]
+        self.wg_err = ""
+        self.wg_jobs, self.wg_failed, self.wg_rows = {}, set(), {}
+        self._wg_checking = False
+        self._wg_q, self._wg_lock, self._wg_worker = [], threading.Lock(), False
 
         shared.seed()
         self._clean_downloads()
@@ -241,8 +329,13 @@ class MainWindow(QMainWindow):
         self.poll = QTimer(self)
         self.poll.timeout.connect(self._poll)
         self.poll.start(3000)
-        if time.time() - float(prefs.get("releases_checked", 0) or 0) > CHECK_EVERY:
+        # yeni sürüme güncellenince (ya da saatte bir) hemen denetle: yeni eklenen uygulamaların durumu da gelsin
+        fresh = prefs.get("last_version") != __version__
+        prefs.set("last_version", __version__)
+        if fresh or time.time() - float(prefs.get("releases_checked", 0) or 0) > CHECK_EVERY:
             QTimer.singleShot(300, self.check_updates)
+        if time.time() - float(prefs.get("wg_checked", 0) or 0) > CHECK_EVERY:
+            QTimer.singleShot(800, self.check_other)
 
     # -- durum
     def scan(self):
@@ -266,6 +359,10 @@ class MainWindow(QMainWindow):
         after = ({k: (v.version if v else None) for k, v in self.inst.items()}, set(self.running))
         if before != after:
             self.refresh_cards()
+        try:
+            self._refresh_wg_status()          # "son denetim N dk önce" eskimesin
+        except RuntimeError:
+            pass
 
     def refresh_cards(self):
         for c in self.cards.values():
@@ -279,16 +376,29 @@ class MainWindow(QMainWindow):
         root.setObjectName("Root")
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setObjectName("Scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer.addWidget(scroll)
-        body = QWidget()
-        scroll.setWidget(body)
-        lay = QVBoxLayout(body)
-        lay.setContentsMargins(32, 26, 32, 32)
-        lay.setSpacing(10)
+        outer.setSpacing(0)
+        top = QWidget()
+        tlay = QVBoxLayout(top)
+        tlay.setContentsMargins(32, 26, 32, 10)
+        tlay.setSpacing(14)
+        outer.addWidget(top)
+        self.stack = QStackedWidget()
+        outer.addWidget(self.stack, 1)
+
+        def page():
+            scroll = QScrollArea()
+            scroll.setObjectName("Scroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.stack.addWidget(scroll)
+            body = QWidget()
+            scroll.setWidget(body)
+            pl = QVBoxLayout(body)
+            pl.setContentsMargins(32, 8, 32, 32)
+            pl.setSpacing(10)
+            return pl
+        lay = page()
 
         head = QHBoxLayout()
         head.setSpacing(12)
@@ -308,13 +418,28 @@ class MainWindow(QMainWindow):
         self.btn_self.clicked.connect(self.update_self)
         head.addWidget(self.btn_self)
         head.addStretch(1)
-        self.btn_check = QPushButton(t("checking") if self._checking else t("check"))
-        self.btn_check.setEnabled(not self._checking)
+        self.btn_check = QPushButton()
         self.btn_check.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_check.clicked.connect(lambda: self.check_updates(force=True))
+        self.btn_check.clicked.connect(
+            lambda: self.check_updates(force=True) if self.tab == 0 else self.check_other())
         head.addWidget(self.btn_check)
-        lay.addLayout(head)
-        lay.addSpacing(14)
+        tlay.addLayout(head)
+
+        trow = QHBoxLayout()
+        trow.setSpacing(6)
+        tgrp = QButtonGroup(top)
+        self.tabs = []
+        for i, key in enumerate(("tab_family", "tab_other")):
+            b = QPushButton(t(key))
+            b.setObjectName("Chip")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, i=i: self.set_tab(i))
+            tgrp.addButton(b)
+            trow.addWidget(b)
+            self.tabs.append(b)
+        trow.addStretch(1)
+        tlay.addLayout(trow)
 
         lay.addWidget(self._section(t("apps")))
         self.cards = {}
@@ -327,7 +452,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._section(t("shared")))
         lay.addWidget(self._settings_card())
         lay.addStretch(1)
+        self._build_other(page())
         self._refresh_self()
+        self.set_tab(self.tab, save=False)
         old = self.centralWidget()
         self.setCentralWidget(root)
         if old:
@@ -338,6 +465,199 @@ class MainWindow(QMainWindow):
         lb.setObjectName("Section")
         lb.setContentsMargins(4, 0, 0, 4)
         return lb
+
+    # -- sekmeler
+    def set_tab(self, i, save=True):
+        self.tab = i
+        self.stack.setCurrentIndex(i)
+        for k, b in enumerate(self.tabs):
+            b.setChecked(k == i)
+        if save:
+            prefs.set("tab", i)
+        self._refresh_check_btn()
+
+    def _refresh_check_btn(self):
+        try:
+            busy = self._checking if self.tab == 0 else self._wg_checking
+            self.btn_check.setEnabled(not busy)
+            self.btn_check.setText(t("checking") if busy else t("check"))
+        except (RuntimeError, AttributeError):
+            pass
+
+    # -- diğer uygulamalar (winget)
+    def _build_other(self, lay):
+        hrow = QHBoxLayout()
+        hrow.addWidget(self._section(t("updates")))
+        hrow.addStretch(1)
+        self.btn_all = QPushButton(t("update_all"))
+        self.btn_all.setObjectName("Primary")
+        self.btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_all.clicked.connect(self.update_all)
+        hrow.addWidget(self.btn_all, 0, Qt.AlignmentFlag.AlignBottom)
+        lay.addLayout(hrow)
+        srow = QHBoxLayout()
+        srow.setContentsMargins(4, 0, 0, 0)
+        self.wg_status = QLabel()
+        self.wg_status.setObjectName("Status")
+        self.wg_status.setWordWrap(True)
+        srow.addWidget(self.wg_status, 1)
+        self.btn_getwg = QPushButton(t("get_winget"))
+        self.btn_getwg.setObjectName("Link")
+        self.btn_getwg.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_getwg.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(W.WINGET_STORE)))
+        srow.addWidget(self.btn_getwg)
+        lay.addLayout(srow)
+        self.wg_card = QFrame()
+        self.wg_card.setObjectName("Card")
+        self.wg_lay = QVBoxLayout(self.wg_card)
+        self.wg_lay.setContentsMargins(0, 4, 0, 4)
+        self.wg_lay.setSpacing(0)
+        lay.addWidget(self.wg_card)
+        hint = QLabel(t("wg_hint"))
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        hint.setContentsMargins(4, 2, 4, 0)
+        lay.addWidget(hint)
+
+        lay.addSpacing(18)
+        store = QFrame()
+        store.setObjectName("Card")
+        sl = QHBoxLayout(store)
+        sl.setContentsMargins(20, 14, 14, 14)
+        sl.setSpacing(14)
+        mid = QVBoxLayout()
+        mid.setSpacing(1)
+        nm = QLabel(t("store"))
+        nm.setObjectName("RowName")
+        mid.addWidget(nm)
+        ds = QLabel(t("store_desc"))
+        ds.setObjectName("Muted")
+        ds.setWordWrap(True)
+        mid.addWidget(ds)
+        sl.addLayout(mid, 1)
+        sb = QPushButton(t("store_open"))
+        sb.setCursor(Qt.CursorShape.PointingHandCursor)
+        sb.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(W.STORE_UPDATES)))
+        sl.addWidget(sb)
+        lay.addWidget(store)
+        lay.addStretch(1)
+        self._fill_other()
+
+    def _fill_other(self):
+        """Güncelleme satırlarını, durum yazısını ve sekme sayacını yeniden kur."""
+        try:
+            while self.wg_lay.count():
+                w = self.wg_lay.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+        except RuntimeError:
+            return
+        self.wg_rows = {}
+        for i, item in enumerate(self.wg):
+            if i:
+                d = QFrame()
+                d.setObjectName("Divider")
+                self.wg_lay.addWidget(d)
+            row = WgRow(item, self)
+            self.wg_rows[item["id"]] = row
+            self.wg_lay.addWidget(row)
+        self.wg_card.setVisible(bool(self.wg))
+        self._refresh_wg_status()
+        self.btn_getwg.setVisible(self.wg_err == "missing")
+        self.btn_all.setVisible(any(x["id"] not in self.wg_jobs for x in self.wg) and len(self.wg) > 1)
+
+    def _refresh_wg_status(self):
+        n = len(self.wg)
+        checked = float(prefs.get("wg_checked", 0) or 0)
+        if self._wg_checking:
+            msg = t("checking")
+        elif self.wg_err == "missing":
+            msg = t("wg_missing")
+        elif self.wg_err:
+            msg = t("wg_fail")
+        elif not checked:
+            msg = t("wg_never")
+        else:
+            msg = (t("wg_count", n=n) if n else t("wg_none")) + "  ·  " + t("wg_checked", t=ago(checked))
+        self.wg_status.setText(msg)
+        self.wg_status.setProperty("state", "new" if n and not self._wg_checking else "")
+        self.wg_status.style().unpolish(self.wg_status)
+        self.wg_status.style().polish(self.wg_status)
+        self.tabs[1].setText(t("tab_other") + (f"  ·  {n}" if n else ""))
+
+    def check_other(self):
+        if self._wg_checking:
+            return
+        self._wg_checking = True
+        self._refresh_check_btn()
+        self._fill_other()
+        threading.Thread(target=lambda: self.bus.wg_list.emit(*W.list_upgrades()), daemon=True).start()
+
+    def _on_wg_list(self, rows, err):
+        self._wg_checking = False
+        self.wg_err = err
+        if not err or err == "missing":
+            ids = {r["id"] for r in rows}
+            keep = [x for x in self.wg if x["id"] in self.wg_jobs and x["id"] not in ids]
+            self.wg = rows + keep
+            self.wg_failed &= ids
+            prefs.update({"wg_upgrades": self.wg, "wg_checked": 0 if err else time.time()})
+        self._refresh_check_btn()
+        self._fill_other()
+
+    def update_pkg(self, pid):
+        if pid in self.wg_jobs:
+            return
+        self.wg_failed.discard(pid)
+        self.wg_jobs[pid] = {"phase": "queued", "p": -1}
+        with self._wg_lock:
+            self._wg_q.append(pid)
+            start = not self._wg_worker
+            self._wg_worker = True
+        if start:
+            threading.Thread(target=self._wg_work, daemon=True).start()
+        self._fill_other()
+
+    def update_all(self):
+        for x in list(self.wg):
+            self.update_pkg(x["id"])
+
+    def _wg_work(self):
+        """Paketleri sırayla güncelle (winget aynı anda iki kurulumu sevmez)."""
+        while True:
+            with self._wg_lock:
+                if not self._wg_q:
+                    self._wg_worker = False
+                    return
+                pid = self._wg_q.pop(0)
+            last = [-2]
+
+            def pct(p, pid=pid):
+                if p != last[0]:
+                    last[0] = p
+                    self.bus.wg_pct.emit(pid, p)
+            pct(-1)
+            self.bus.wg_done.emit(pid, W.upgrade(pid, pct))
+
+    def _on_wg_pct(self, pid, p):
+        job = self.wg_jobs.get(pid)
+        if job:
+            job.update(phase="run", p=p)
+            row = self.wg_rows.get(pid)
+            if row:
+                try:
+                    row.refresh()
+                except RuntimeError:
+                    pass
+
+    def _on_wg_done(self, pid, code):
+        self.wg_jobs.pop(pid, None)
+        if code in WG_OK:
+            self.wg = [x for x in self.wg if x["id"] != pid]
+            prefs.set("wg_upgrades", self.wg)
+        else:
+            self.wg_failed.add(pid)
+        self._fill_other()
 
     def _settings_card(self):
         card = QFrame()
@@ -486,8 +806,7 @@ class MainWindow(QMainWindow):
         if self._checking:
             return
         self._checking = True
-        self.btn_check.setEnabled(False)
-        self.btn_check.setText(t("checking"))
+        self._refresh_check_btn()
 
         def work():
             self.bus.release.emit(SELF, github.latest(REPO))
@@ -510,11 +829,7 @@ class MainWindow(QMainWindow):
         prefs.update({"releases": {k: {x: y for x, y in v.items() if x != "error" or y == "none"}
                                    for k, v in self.rel.items()},
                       "releases_checked": time.time()})
-        try:
-            self.btn_check.setEnabled(True)
-            self.btn_check.setText(t("check"))
-        except RuntimeError:
-            pass
+        self._refresh_check_btn()
 
     # -- indir + kur
     def install(self, aid):
@@ -568,7 +883,9 @@ class MainWindow(QMainWindow):
         """Başlıkta sürüm numarası; yeni sürüm varsa yanında Güncelle düğmesi."""
         try:
             rv, job = self._self_newer(), self.jobs.get(SELF)
-            self.lbl_ver.setText(__version__ + ("  ·  " + t("new_v", v=rv) if rv else ""))
+            err = (self.rel.get(SELF) or {}).get("error")
+            extra = t("new_v", v=rv) if rv else t("rate_error") if err == "rate" else t("net_error") if err == "net" else ""
+            self.lbl_ver.setText(__version__ + ("  ·  " + extra if extra else ""))
             self.lbl_ver.setProperty("state", "new" if rv else "")
             self.lbl_ver.style().unpolish(self.lbl_ver)
             self.lbl_ver.style().polish(self.lbl_ver)
