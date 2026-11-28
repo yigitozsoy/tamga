@@ -294,7 +294,7 @@ def _signed(c):
     return c - (1 << 32) if c >= (1 << 31) else c
 
 
-def _run_elevated(file, params):
+def run_elevated(file, params):
     """Yönetici olarak (Windows izin sorar), gizli pencerede çalıştır. -> (süreç tutamacı, 0) | (None, hata)."""
     import ctypes
     from ctypes import wintypes
@@ -314,60 +314,151 @@ def _run_elevated(file, params):
     return sei.hProcess, 0
 
 
-def _upgrade_admin(w, args, pid, on_phase, machine):
-    """Yönetici olarak: çıktı okunamaz; indirme geçici klasördeki dosyadan izlenir, dosya 3 sn büyümezse kurulum.
+def run_elevated_ps(script):
+    """PowerShell betiğini yönetici olarak, gizli çalıştır. -> (tutamaç, 0) | (None, hata)."""
+    import base64
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return run_elevated("powershell.exe", f"-NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                                          f"-WindowStyle Hidden -EncodedCommand {enc}")
+
+
+def proc_running(h):
+    import ctypes
+    return bool(h) and ctypes.windll.kernel32.WaitForSingleObject(h, 0) == 0x102     # WAIT_TIMEOUT
+
+
+def proc_close(h):
+    import ctypes
+    if h:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def ps_quote(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def write_json(path, obj):
+    """Yarım dosya okunmasın: geçici dosyaya yaz, sonra yerine taşı."""
+    import json
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    import json
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+# Yönetici çalıştırıcısı: izin bir kez sorulur, sıradaki tüm paketler aynı yönetici PowerShell'inde kurulur.
+# tamga job.json'a {seq, id, machine} yazar; çalıştırıcı winget'i çalıştırıp result.json'a {seq, code} yazar.
+# tamga kapanırsa (üst süreç yok) ya da {quit} gelirse çıkar.
+_RUNNER = r"""
+$dir = {dir}; $parent = {parent}; $w = {winget}; $seq = 0
+$job = Join-Path $dir 'job.json'; $res = Join-Path $dir 'result.json'
+while ($true) {{
+  if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue) -or -not (Test-Path -LiteralPath $dir)) {{ break }}
+  if (Test-Path -LiteralPath $job) {{
+    $j = $null
+    try {{ $j = Get-Content -LiteralPath $job -Raw -Encoding UTF8 | ConvertFrom-Json }} catch {{ }}
+    if ($j -and $j.quit) {{ break }}
+    if ($j -and $j.seq -gt $seq) {{
+      $seq = $j.seq
+      $a = @('upgrade', '--id', $j.id, '--exact', '--silent', '--include-unknown', '--accept-package-agreements',
+             '--accept-source-agreements', '--disable-interactivity')
+      if ($j.machine) {{
+        & $w @a --scope machine | Out-Null
+        if ($LASTEXITCODE -eq {no_app}) {{ & $w @a | Out-Null }}
+      }} else {{ & $w @a | Out-Null }}
+      $o = @{{ seq = $seq; code = $LASTEXITCODE }} | ConvertTo-Json -Compress
+      [IO.File]::WriteAllText("$res.tmp", $o)
+      Move-Item -LiteralPath "$res.tmp" -Destination $res -Force
+    }}
+  }}
+  Start-Sleep -Milliseconds 300
+}}
+Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+"""
+
+
+class AdminRunner:
+    """Yönetici olarak güncelleme: ilk pakette izin sorulur, close()'a kadar aynı süreç kullanılır.
+
+    Çıktı okunamaz: indirme winget'in geçici klasöründeki dosyadan izlenir, dosya 3 sn büyümezse kurulum.
     Herkes için kurulu uygulamada önce --scope machine (kullanıcı kurulumu "zaten herkes için kurulu" diye
     reddedilir), uygun kurulum dosyası yoksa kapsamsız yeniden."""
-    import base64
-    import ctypes
-    import time
 
-    def q(a):
-        return "'" + a.replace("'", "''") + "'"
+    def __init__(self):
+        self.h = None
+        self.dir = ""
+        self.seq = 0
 
-    cmd = "& " + " ".join(q(a) for a in [w] + args)
-    if machine:
-        script = (f"{cmd} --scope machine; if ($LASTEXITCODE -eq {_signed(NO_APPLICABLE)}) {{ {cmd} }}; "
-                  "exit $LASTEXITCODE")
-    else:
-        script = f"{cmd}; exit $LASTEXITCODE"
-    enc = base64.b64encode(script.encode("utf-16-le")).decode()
-    h, err = _run_elevated("powershell.exe", f"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {enc}")
-    if not h:
+    def _start(self):
+        w = exe()
+        if not w:
+            return -1
+        self.dir = tempfile.mkdtemp(prefix="tamga-admin-")
+        self.seq = 0
+        script = _RUNNER.format(dir=ps_quote(self.dir), parent=os.getpid(), winget=ps_quote(w),
+                                no_app=_signed(NO_APPLICABLE))
+        self.h, err = run_elevated_ps(script)
         return err
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    on_phase and on_phase("download")
-    last, still, phase = -1, 0, "download"
-    try:
-        while k32.WaitForSingleObject(h, 500) == 0x102:              # WAIT_TIMEOUT
-            if phase != "download":
-                continue
-            got = staged_bytes(pid)
-            still = still + 1 if got and got == last else 0
-            last = got
-            if still >= 6:
-                phase = "install"
-                on_phase and on_phase(phase)
-        code = ctypes.c_ulong()
-        k32.GetExitCodeProcess(h, ctypes.byref(code))
-        return _signed(code.value)
-    finally:
-        k32.CloseHandle(h)
+
+    def run(self, pid, machine=False, on_phase=None):
+        import time
+        if not proc_running(self.h):
+            self.close()
+            err = self._start()
+            if err:
+                return err
+        self.seq += 1
+        res = os.path.join(self.dir, "result.json")
+        clear_staged(pid)
+        write_json(os.path.join(self.dir, "job.json"), {"seq": self.seq, "id": pid, "machine": bool(machine)})
+        on_phase and on_phase("download")
+        last, still, phase = -1, 0, "download"
+        while True:
+            r = read_json(res)
+            if isinstance(r, dict) and r.get("seq") == self.seq:
+                return int(r.get("code") or 0)
+            if not proc_running(self.h):
+                return -1
+            time.sleep(0.5)
+            if phase == "download":
+                got = staged_bytes(pid)
+                still = still + 1 if got and got == last else 0
+                last = got
+                if still >= 6:
+                    phase = "install"
+                    on_phase and on_phase(phase)
+
+    def close(self):
+        if self.h:
+            if self.dir and proc_running(self.h):
+                try:
+                    write_json(os.path.join(self.dir, "job.json"), {"quit": True})
+                except OSError:
+                    pass
+            proc_close(self.h)          # klasörü çalıştırıcı siler (çıkarken)
+        self.h = None
+        self.dir = ""
 
 
-def upgrade(pid, on_phase=None, admin=False, machine=False):
+def upgrade(pid, on_phase=None):
     """Tek paketi sessizce güncelle. on_phase("download" | "install") aşama değişince. -> çıkış kodu.
 
     Çıktıda adres geçen satır ("Downloading https://…") indirmenin, ondan sonraki ilk satır
-    (kurulum dosyası doğrulandı) kurulumun başladığını gösterir. admin: yönetici olarak (izin sorulur)."""
+    (kurulum dosyası doğrulandı) kurulumun başladığını gösterir. Yönetici olarak: AdminRunner."""
     w = exe()
     if not w:
         return -1
-    opts = ["upgrade", "--id", pid, "--exact", "--silent", "--include-unknown", "--accept-package-agreements"] + AGREE
     clear_staged(pid)
-    if admin:
-        return _upgrade_admin(w, opts, pid, on_phase, machine)
-    args = [w] + opts
+    args = [w, "upgrade", "--id", pid, "--exact", "--silent", "--include-unknown", "--accept-package-agreements"] + AGREE
     try:
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
     except OSError:

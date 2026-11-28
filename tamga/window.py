@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import QFileInfo, QObject, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QFileIconProvider, QFrame, QGridLayout,
+from PyQt6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFileIconProvider, QFrame, QGridLayout,
                              QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
                              QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -16,6 +16,7 @@ from . import REPO, __version__
 from . import apps as A
 from . import github, shared, theme
 from . import winget as W
+from .wu_tab import WuPage
 from .config import DOWNLOAD_DIR, asset, prefs
 from .i18n import is_tr, t
 from .palette import ACCENTS, VARIANTS
@@ -442,12 +443,14 @@ class MainWindow(QMainWindow):
         self._cancel = set()
         self._status_msg = ""
         # diğer uygulamalar (winget)
-        self.tab = 1 if prefs.get("tab") == 1 else 0
+        self.tab = prefs.get("tab") if prefs.get("tab") in (0, 1, 2) else 0
         self.wg = [x for x in (prefs.get("wg_upgrades") or []) if isinstance(x, dict) and x.get("id")]
         self.wg_err = ""
         self.wg_jobs, self.wg_failed, self.wg_rows = {}, {}, {}      # wg_failed: kimlik -> (kod, yönetici miydi)
         self._wg_checking = False
         self._wg_q, self._wg_lock, self._wg_worker = [], threading.Lock(), False
+        self._admin = W.AdminRunner()           # yönetici izni sırada bir kez
+        self._wg_no_admin = False
         self.wg_sizes = {k: v for k, v in (prefs.get("wg_sizes") or {}).items() if isinstance(v, list) and len(v) == 2}
         self._wg_sizing = False
         self.wg_show_hidden = False
@@ -456,6 +459,7 @@ class MainWindow(QMainWindow):
         self._icons = {}
         self.wg_tick = QTimer(self)
         self.wg_tick.timeout.connect(self._wg_tick)
+        self.wu = WuPage(self)                  # Windows güncellemeleri (durumu yeniden kurulumlarda kalır)
 
         shared.seed()
         self._clean_downloads()
@@ -479,6 +483,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(800, self.check_other)
         else:
             QTimer.singleShot(800, self._fetch_sizes)
+        if self.wu.due():
+            QTimer.singleShot(1500, self.wu.check)
 
     # -- durum
     def scan(self):
@@ -504,6 +510,7 @@ class MainWindow(QMainWindow):
             self.refresh_cards()
         try:
             self._refresh_wg_status()          # "son denetim N dk önce" eskimesin
+            self.wu.refresh()
         except RuntimeError:
             pass
 
@@ -569,8 +576,7 @@ class MainWindow(QMainWindow):
         head.addStretch(1)
         self.btn_check = QPushButton()
         self.btn_check.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_check.clicked.connect(
-            lambda: self.check_updates(force=True) if self.tab == 0 else self.check_other())
+        self.btn_check.clicked.connect(self._check_tab)
         head.addWidget(self.btn_check)
         tlay.addLayout(head)
 
@@ -578,7 +584,7 @@ class MainWindow(QMainWindow):
         trow.setSpacing(6)
         tgrp = QButtonGroup(top)
         self.tabs = []
-        for i, key in enumerate(("tab_family", "tab_other")):
+        for i, key in enumerate(("tab_family", "tab_other", "tab_windows")):
             b = QPushButton(t(key))
             b.setObjectName("Chip")
             b.setCheckable(True)
@@ -602,6 +608,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._settings_card())
         lay.addStretch(1)
         self._build_other(page())
+        self.wu.build(page())
         self._refresh_self()
         self.set_tab(self.tab, save=False)
         old = self.centralWidget()
@@ -625,9 +632,17 @@ class MainWindow(QMainWindow):
             prefs.set("tab", i)
         self._refresh_check_btn()
 
+    def _check_tab(self):
+        if self.tab == 0:
+            self.check_updates(force=True)
+        elif self.tab == 1:
+            self.check_other()
+        else:
+            self.wu.check()
+
     def _refresh_check_btn(self):
         try:
-            busy = self._checking if self.tab == 0 else self._wg_checking
+            busy = (self._checking, self._wg_checking, self.wu.checking)[self.tab]
             self.btn_check.setEnabled(not busy)
             self.btn_check.setText(t("checking") if busy else t("check"))
         except (RuntimeError, AttributeError):
@@ -708,6 +723,16 @@ class MainWindow(QMainWindow):
         self.wg_lay.setContentsMargins(0, 4, 0, 4)
         self.wg_lay.setSpacing(0)
         lay.addWidget(self.wg_card)
+        self.cb_admin = QCheckBox(t("wg_admin_mode"))
+        self.cb_admin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cb_admin.setToolTip(t("wg_admin_mode_tip"))
+        self.cb_admin.setChecked(bool(prefs.get("wg_admin", True)))
+        self.cb_admin.toggled.connect(lambda on: prefs.set("wg_admin", bool(on)))
+        arow = QHBoxLayout()
+        arow.setContentsMargins(4, 4, 0, 0)
+        arow.addWidget(self.cb_admin)
+        arow.addStretch(1)
+        lay.addLayout(arow)
         hint = QLabel(t("wg_hint"))
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
@@ -957,6 +982,7 @@ class MainWindow(QMainWindow):
         if not self.wg_jobs:
             self.wg_batch = {"total": 0, "done": 0, "ok": 0, "fail": 0}
             self.wg_summary = ""
+            self._wg_no_admin = False
         self.wg_batch["total"] += 1
         self.wg_failed.pop(pid, None)
         self.wg_jobs[pid] = {"phase": "queued", "p": -1, "admin": admin}
@@ -1002,13 +1028,21 @@ class MainWindow(QMainWindow):
             with self._wg_lock:
                 if not self._wg_q:
                     self._wg_worker = False
+                    self._admin.close()
                     return
                 pid = self._wg_q.pop(0)
             self.bus.wg_phase.emit(pid, "start")
-            admin = bool((self.wg_jobs.get(pid) or {}).get("admin"))
             name = next((x["name"] for x in list(self.wg) if x["id"] == pid), "")
-            machine = admin and W.machine_installed(name)
-            code = W.upgrade(pid, lambda ph, pid=pid: self.bus.wg_phase.emit(pid, ph), admin=admin, machine=machine)
+            machine = W.machine_installed(name)
+            # yönetici kipinde herkes için kurulu olanlar yönetici olarak; kullanıcıya kurulu olanlar
+            # (Discord, Spotify gibi yönetici olarak kurulmayı reddedenler) her zaman normal
+            admin = bool((self.wg_jobs.get(pid) or {}).get("admin")) or (machine and bool(prefs.get("wg_admin", True)))
+            admin = admin and not self._wg_no_admin           # izin bir kez reddedildiyse sırada yeniden sorma
+            phase = lambda ph, pid=pid: self.bus.wg_phase.emit(pid, ph)
+            code = self._admin.run(pid, machine, phase) if admin else W.upgrade(pid, phase)
+            if admin and W.reason(code) == "denied":
+                self._wg_no_admin = True
+                self._admin.close()
             self.bus.wg_done.emit(pid, code)
 
     def _on_wg_phase(self, pid, phase):

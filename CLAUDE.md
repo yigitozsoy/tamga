@@ -14,6 +14,9 @@ tamga/github.py       Releases API (kimliksiz), kurulum dosyası seçimi (.exe, 
 tamga/winget.py       "Diğer uygulamalar" sekmesi: `winget upgrade` tablosunu konumla okur (başlık dile göre değişir), sırayla sessiz güncelleme,
                       önerilenler (RECOMMENDED: Microsoft.* + güvenlik), simge (kaldırma kaydı DisplayIcon / InstallLocation),
                       boyut (`winget show` SHA256 üstündeki adres + HEAD), indirme ilerlemesi (%TEMP%\WinGet\<id>.<sürüm>, os.stat)
+tamga/winupdate.py   Windows Update COM'u (Microsoft.Update.Session) PowerShell ile: arama (yöneticisiz, ~30 sn, JSON),
+                      kurma (yönetici PowerShell bir kez, ilerleme durum dosyasında), gizleme; tür sınıflandırma kimliğinden
+tamga/wu_tab.py       "Windows" sekmesi (WuPage): seç / kur / gizle, ilerleme kartı, yeniden başlatma
 tamga/shared.py       ortak anahtarları uygulamaların tercih dosyasına yazar
 tamga/palette.py      yazıt/erk/kamug ile birebir aynı tema çeşitleri ve vurgular (yazıt theme.py'den kopya)
 sync/tamga_sync.py    kamug/erk/yazıt içindeki tamga_sync.py'nin ana kopyası (smoke test eşliği denetler)
@@ -34,8 +37,9 @@ packaging/            build.ps1, tamga.spec, installer.iss (AppId {FB53E9DE-E7AE
 - winget çıktısı yönlendirilince ilerleme çubuğu / yüzde YAZMAZ: aşama satırlardan ("Downloading https://…" sonra
   doğrulama), yüzde geçici klasördeki dosyanın boyutundan. Dizin kaydı yazılırken güncellenmez: `scandir` değil `os.stat`.
 - winget `--silent` yönetici izni penceresi açmaz: herkes için kurulu MSI'lar 1603 / 0x8A150049 ile düşer. Neden
-  `winget.reason(kod)`; "Yönetici olarak dene" PowerShell'i runas ile açar (ShellExecuteEx, çıktı yok, ilerleme dosyadan),
-  HKLM'de kayıtlıysa `--scope machine`, uygun kurulum yoksa kapsamsız yeniden. Hata ayıklama: winget günlükleri
+  `winget.reason(kod)`. Yönetici kipi (`wg_admin`, varsayılan açık): HKLM'de kayıtlı paketler `AdminRunner`'a gider —
+  runas ile bir kez açılan PowerShell, job.json / result.json ile sıradaki tüm paketleri kurar, `--scope machine`,
+  uygun kurulum yoksa kapsamsız yeniden. HKCU'dakiler (Discord, Spotify: yönetici olarak kurulmayı reddeder) normal. Hata ayıklama: winget günlükleri
   `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
 - Sürüm notu: build.yml etiketlenen commit'in mesajını yayın gövdesi yapar; commit mesajını sürüm notu gibi yaz.
 - Test: `python tests/smoke_test.py` (LOCALAPPDATA ve TAMGA_DATA_DIR geçici klasöre, ağ sahte, pencere ekranda değil).

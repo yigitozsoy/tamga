@@ -80,6 +80,16 @@ check("bediz: tema + vurgu, dil / çeşit anahtarı yok, diğerleri korunur", d[
 
 # winget tablosu (İngilizce ve Türkçe başlık, dönen çubuk, ikinci tablo)
 from tamga import winget as W  # noqa: E402
+from tamga import winupdate as U  # noqa: E402
+
+wu_ups, wu_rb, wu_err = U.parse(json.dumps({"ok": True, "reboot": True, "updates": {
+    "id": "a", "title": "x", "cls": "E0789628-CE08-4437-BE74-2495B842F43B", "type": 1}}))
+check("Windows Update: tek öğe, tür, yeniden başlatma", wu_err == 0 and wu_rb and len(wu_ups) == 1
+      and wu_ups[0]["kind"] == "definition" and U.default_selected(wu_ups[0]))
+check("Windows Update: sürücü ve isteğe bağlı seçili değil, güvenlik önemli",
+      not U.default_selected({"type": 2}) and not U.default_selected({"cls": "", "optional": True})
+      and U.important({"cls": "0fa1201d-4330-4fa8-8ae9-b877473b6441"}) and not U.important({"type": 2})
+      and U.parse('{"ok": false, "hr": -2145124318}') == ([], False, -2145124318) and U.parse("bozuk")[2] == -1)
 WG_EN = ("   - \r   \\ \r\r"
          "Name                       Id                Version       Available     Source\r\n"
          "--------------------------------------------------------------------------------\r\n"
@@ -154,6 +164,36 @@ if "--no-gui" not in sys.argv:
                {"name": "Visual C++", "id": "Microsoft.VCRedist.2015+.x64", "version": "14.5", "available": "14.6",
                 "source": "winget"}]
     W.list_upgrades = lambda: ([dict(x) for x in wg_fake], "")
+    # Windows Update sahte
+    wu_fake = [
+        {"id": "sec-1", "title": "2026-11 Toplu Güncelleştirme", "kb": "5050001", "size": 900 * 1024 ** 2,
+         "cls": "0fa1201d-4330-4fa8-8ae9-b877473b6441", "type": 1, "severity": "Critical"},
+        {"id": "drv-1", "title": "Intel - System - 11.7", "kb": "", "size": 49010,
+         "cls": "ebfc1fc5-71a4-4f7b-9aca-3b9a503104a0", "type": 2},
+        {"id": "def-1", "title": "Defender tanımları", "kb": "2267602", "size": 1582832168,
+         "cls": "e0789628-ce08-4437-be74-2495b842f43b", "type": 1},
+    ]
+    U.search = lambda: U.parse(json.dumps({"ok": True, "updates": [dict(x) for x in wu_fake], "reboot": False}))
+    hide_calls = []
+    U.set_hidden = lambda ids, hidden=True: hide_calls.append((list(ids), hidden)) or 0
+
+    class FakeInstaller:
+        started = []
+        state = {}
+
+        def start(self, ids):
+            FakeInstaller.started.append(list(ids))
+            return 0
+
+        def running(self):
+            return FakeInstaller.state.get("phase") not in ("done", "error")
+
+        def poll(self):
+            return dict(FakeInstaller.state) if FakeInstaller.state else None
+
+        def close(self):
+            pass
+    U.Installer = FakeInstaller
     W.size = lambda pid: {"Discord.Discord": 100 * 1024 ** 2, "Valve.Steam": 0}.get(pid, 20 * 1024 ** 2)
     W.staged_bytes = lambda pid, root=None: 50 * 1024 ** 2
     wg_calls = []
@@ -161,18 +201,31 @@ if "--no-gui" not in sys.argv:
 
     admin_calls = []
 
-    def fake_upgrade(pid, on_phase=None, admin=False, machine=False):
-        (admin_calls if admin else wg_calls).append((pid, machine) if admin else pid)
+    def fake_upgrade(pid, on_phase=None):
+        wg_calls.append(pid)
         on_phase and on_phase("download")
         gate.wait(5)
         on_phase and on_phase("install")
-        return 0 if pid != "Valve.Steam" else (-1978335159 if not admin else 1223)   # 0x8A150049 MSI; izin verilmedi
+        return 0 if pid != "Valve.Steam" else -1978335159          # 0x8A150049: MSI kurulumu başarısız
     W.upgrade = fake_upgrade
     W.machine_installed = lambda name: name == "Steam"
+
+    class FakeRunner:
+        closed = 0
+
+        def run(self, pid, machine=False, on_phase=None):
+            admin_calls.append((pid, machine))
+            on_phase and on_phase("download")
+            return 1223 if len(admin_calls) == 1 else 0              # önce izin verilmedi, sonra başarılı
+
+        def close(self):
+            FakeRunner.closed += 1
+    prefs.set("wg_admin", False)
     from tamga.window import MainWindow
     w = MainWindow()
     w.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
     w.show()
+    w._admin = FakeRunner()
     w.check_updates(force=True)
     import time
     end = time.time() + 5
@@ -272,6 +325,44 @@ if "--no-gui" not in sys.argv:
     w._fill_other()
     check("açık uygulama: kapat ve yeniden dene", "kapatıp" in w.wg_rows["Valve.Steam"].status.text()
           and w.wg_rows["Valve.Steam"].btn.text() == "Güncelle")
+    check("yönetici kipi kutusu", not w.cb_admin.isChecked())
+    w.cb_admin.setChecked(True)
+    n_plain = len(wg_calls)
+    w.update_pkg("Valve.Steam")
+    pump(lambda: w.wg_jobs or w._wg_worker)
+    check("yönetici kipi: herkes için kurulu olan doğrudan yönetici olarak", prefs.get("wg_admin") is True
+          and admin_calls[-1] == ("Valve.Steam", True) and len(wg_calls) == n_plain
+          and "Valve.Steam" not in w.wg_rows and FakeRunner.closed >= 1)
+
+    # Windows sekmesi
+    w.set_tab(2)
+    w.wu.check()
+    pump(lambda: w.wu.checking)
+    wu = w.wu
+    check("Windows: satırlar, sayaç, varsayılan seçim", set(wu.rows) == {"sec-1", "drv-1", "def-1"}
+          and wu.sel == {"sec-1", "def-1"} and "Windows  ·  3" == w.tabs[2].text()
+          and wu.btn_install.text() == "Seçilenleri kur (2)" and list(wu.rows)[0] == "sec-1")
+    check("Windows: Önemli işareti, boyut, tanımlarda boyut yok", wu.rows["sec-1"].findChild(QLabel, "Badge") is not None
+          and "en çok 900 MB" in wu.rows["sec-1"].findChildren(QLabel, "Status")[0].text()
+          and "en çok" not in wu.rows["def-1"].findChildren(QLabel, "Status")[0].text())
+    wu.rows["drv-1"].cb.setChecked(True)
+    check("Windows: seçim değişir", "drv-1" in wu.sel and wu.btn_install.text() == "Seçilenleri kur (3)")
+    wu.rows["drv-1"].cb.setChecked(False)
+    wu.hide("drv-1", True)
+    pump(lambda: wu.hiding)
+    check("Windows: gizle", hide_calls == [(["drv-1"], True)] and "drv-1" not in wu.rows
+          and "Windows  ·  2" == w.tabs[2].text() and wu.btn_hidden.isVisible())
+    FakeInstaller.state = {"phase": "install", "i": 1, "n": 2, "id": "sec-1", "results": {}}
+    wu.install()
+    wu._tick()
+    check("Windows: kurulum kartı", FakeInstaller.started == [["sec-1", "def-1"]] and wu.p_card.isVisible()
+          and "Kuruluyor" in wu.p_title.text() and wu.p_count.text() == "1 / 2" and not wu.btn_install.isVisible())
+    FakeInstaller.state = {"phase": "done", "reboot": True,
+                           "results": {"sec-1": {"code": 2, "hr": 0}, "def-1": {"code": 4, "hr": -2145124318}}}
+    wu._tick()
+    check("Windows: sonuç, hata, yeniden başlatma", not wu.busy() and set(wu.rows) == {"def-1"}
+          and "Kurulamadı" in wu.rows["def-1"].findChildren(QLabel, "Status")[0].text()
+          and "1 kuruldu, 1 kurulamadı" in wu.status.text() and wu.rb_card.isVisible() and prefs.get("wu_reboot") is True)
     w.set_tab(0)
 
     prefs.set("sync_apps", ["kamug"])
