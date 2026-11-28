@@ -106,6 +106,10 @@ check("winget show: kurulum adresi (dilden bağımsız)", W.parse_installer_url(
 check("önerilen: Microsoft ve güvenlik", W.recommended("Microsoft.VCRedist.2015+.x64") and W.recommended("oracle.javaruntimeenvironment")
       and not W.recommended("Valve.Steam") and not W.recommended("Discord.Discord")
       and not W.recommended("Microsoft.Teams") and not W.recommended("Microsoft.Outlook"))
+check("hata nedenleri", W.reason(-1978335159) == "fail" and W.reason(-2147009240) == "admin"
+      and W.reason(-1978334975) == "in_use" and W.reason(-1978334963) == "other_version" and W.reason(1223) == "denied"
+      and W.ok(0) and W.ok(-1978335189) and W.ok(-1978334967) and not W.ok(1)
+      and W.code_hex(-1978335159) == "0x8A150049")
 check("simge: ad eşleşmesi", W.match_icon("Microsoft Visual Studio Code (User)", {"microsoft visual studio code (user)": "a"}) == "a"
       and W.match_icon("Microsoft Visual C++ v14 Redistributable", {"microsoft visual c++ v14 redistributable (x64) - 14.5": "b"}) == "b"
       and W.match_icon("Git", {"github cli": "c"}) == "")
@@ -155,13 +159,16 @@ if "--no-gui" not in sys.argv:
     wg_calls = []
     gate = threading.Event()
 
-    def fake_upgrade(pid, on_phase=None):
-        wg_calls.append(pid)
+    admin_calls = []
+
+    def fake_upgrade(pid, on_phase=None, admin=False, machine=False):
+        (admin_calls if admin else wg_calls).append((pid, machine) if admin else pid)
         on_phase and on_phase("download")
         gate.wait(5)
         on_phase and on_phase("install")
-        return 0 if pid != "Valve.Steam" else 1
+        return 0 if pid != "Valve.Steam" else (-1978335159 if not admin else 1223)   # 0x8A150049 MSI; izin verilmedi
     W.upgrade = fake_upgrade
+    W.machine_installed = lambda name: name == "Steam"
     from tamga.window import MainWindow
     w = MainWindow()
     w.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
@@ -254,6 +261,17 @@ if "--no-gui" not in sys.argv:
           and "Güncellenemedi" in w.wg_rows["Valve.Steam"].status.text() and not w.q_card.isVisible()
           and "1 güncellendi, 1 güncellenemedi" in w.wg_status.text()
           and {x["id"] for x in prefs.get("wg_upgrades")} == {"Discord.Discord", "Valve.Steam"})
+    steam = w.wg_rows["Valve.Steam"]
+    check("başarısız: yönetici olarak dene, hata kodu ipucunda", steam.btn.text() == "Yönetici olarak dene"
+          and "0x8A150049" in steam.status.toolTip() and "yönetici izni" in steam.status.text())
+    steam._act()
+    pump(lambda: w.wg_jobs or w._wg_worker)
+    check("yönetici olarak: herkes için kurulu -> machine", admin_calls == [("Valve.Steam", True)]
+          and "verilmedi" in w.wg_rows["Valve.Steam"].status.text())
+    w.wg_failed["Valve.Steam"] = (-1978334975, False)      # 0x8A150101: uygulama açık
+    w._fill_other()
+    check("açık uygulama: kapat ve yeniden dene", "kapatıp" in w.wg_rows["Valve.Steam"].status.text()
+          and w.wg_rows["Valve.Steam"].btn.text() == "Güncelle")
     w.set_tab(0)
 
     prefs.set("sync_apps", ["kamug"])

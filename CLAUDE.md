@@ -33,5 +33,9 @@ packaging/            build.ps1, tamga.spec, installer.iss (AppId {FB53E9DE-E7AE
   sanal kayıt defterine yazabilir. Gerçek denetim için `Invoke-CimMethod Win32_Process Create`. Kurulu tamga.exe'de sorun yok.
 - winget çıktısı yönlendirilince ilerleme çubuğu / yüzde YAZMAZ: aşama satırlardan ("Downloading https://…" sonra
   doğrulama), yüzde geçici klasördeki dosyanın boyutundan. Dizin kaydı yazılırken güncellenmez: `scandir` değil `os.stat`.
+- winget `--silent` yönetici izni penceresi açmaz: herkes için kurulu MSI'lar 1603 / 0x8A150049 ile düşer. Neden
+  `winget.reason(kod)`; "Yönetici olarak dene" PowerShell'i runas ile açar (ShellExecuteEx, çıktı yok, ilerleme dosyadan),
+  HKLM'de kayıtlıysa `--scope machine`, uygun kurulum yoksa kapsamsız yeniden. Hata ayıklama: winget günlükleri
+  `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
 - Sürüm notu: build.yml etiketlenen commit'in mesajını yayın gövdesi yapar; commit mesajını sürüm notu gibi yaz.
 - Test: `python tests/smoke_test.py` (LOCALAPPDATA ve TAMGA_DATA_DIR geçici klasöre, ağ sahte, pencere ekranda değil).

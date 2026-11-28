@@ -130,6 +130,16 @@ def _exe_in(folder, name):
 
 def arp_icons():
     """Kurulu programlar: küçük harfli görünen ad -> simge dosyası."""
+    return {k: v["icon"] for k, v in arp().items() if v["icon"]}
+
+
+def machine_installed(name):
+    """Uygulama herkes için mi kurulu (kaldırma kaydı HKLM'de)? Öyleyse yönetici kurulumu --scope machine ister."""
+    return bool(match_icon(name, {k: 1 for k, v in arp().items() if v["machine"]}))
+
+
+def arp():
+    """Kurulu programlar: küçük harfli görünen ad -> {icon, machine}. Aynı ad iki yerdeyse kullanıcınınki."""
     out = {}
     try:
         import winreg
@@ -165,8 +175,9 @@ def arp_icons():
                                 pass
                 except OSError:
                     continue
-                if name and icon:
-                    out.setdefault(name.lower(), icon)
+                if name:
+                    e = out.setdefault(name.lower(), {"icon": icon, "machine": hive != winreg.HKEY_CURRENT_USER})
+                    e["icon"] = e["icon"] or icon
     return out
 
 
@@ -253,17 +264,110 @@ def clear_staged(pid, root=None):
 
 # --- güncelleme -------------------------------------------------------------------
 
-def upgrade(pid, on_phase=None):
+DENIED = 1223                     # ERROR_CANCELLED: Windows'un yönetici izni penceresinde "Hayır"
+NO_APPLICABLE = 0x8A150010        # --scope machine'e uyan kurulum dosyası yok
+_OK = {0, 0x8A15002B, 0x8A150109}  # başarılı / uygulanabilir güncelleme yok / yeniden başlatınca tamamlanır
+_REASONS = {
+    0x8A150101: "in_use", 0x8A150103: "in_use", 0x8A150111: "in_use",
+    0x8A15010D: "other_version", 0x8A15010A: "reboot", 0x8A150107: "network", 0x8A150105: "disk",
+    0x80073D28: "admin", DENIED: "denied",
+}
+
+
+def ok(code):
+    return (code & 0xFFFFFFFF) in _OK
+
+
+def reason(code):
+    """Çıkış kodu -> in_use | other_version | reboot | network | disk | admin | denied | fail.
+
+    "fail" çoğunlukla yönetici izni eksikliğidir: herkes için kurulu MSI'ı sessiz (izin penceresiz) kurulum
+    güncelleyemez (1603), eski sürümü kaldıramaz…"""
+    return _REASONS.get(code & 0xFFFFFFFF, "fail")
+
+
+def code_hex(code):
+    return f"0x{code & 0xFFFFFFFF:08X}"
+
+
+def _signed(c):
+    return c - (1 << 32) if c >= (1 << 31) else c
+
+
+def _run_elevated(file, params):
+    """Yönetici olarak (Windows izin sorar), gizli pencerede çalıştır. -> (süreç tutamacı, 0) | (None, hata)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SEI(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", ctypes.c_ulong), ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+
+    sei = SEI(cbSize=ctypes.sizeof(SEI), fMask=0x40 | 0x100,      # NOCLOSEPROCESS | NOASYNC
+              lpVerb="runas", lpFile=file, lpParameters=params, nShow=0)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    if not shell32.ShellExecuteExW(ctypes.byref(sei)) or not sei.hProcess:
+        return None, ctypes.get_last_error() or DENIED
+    return sei.hProcess, 0
+
+
+def _upgrade_admin(w, args, pid, on_phase, machine):
+    """Yönetici olarak: çıktı okunamaz; indirme geçici klasördeki dosyadan izlenir, dosya 3 sn büyümezse kurulum.
+    Herkes için kurulu uygulamada önce --scope machine (kullanıcı kurulumu "zaten herkes için kurulu" diye
+    reddedilir), uygun kurulum dosyası yoksa kapsamsız yeniden."""
+    import base64
+    import ctypes
+    import time
+
+    def q(a):
+        return "'" + a.replace("'", "''") + "'"
+
+    cmd = "& " + " ".join(q(a) for a in [w] + args)
+    if machine:
+        script = (f"{cmd} --scope machine; if ($LASTEXITCODE -eq {_signed(NO_APPLICABLE)}) {{ {cmd} }}; "
+                  "exit $LASTEXITCODE")
+    else:
+        script = f"{cmd}; exit $LASTEXITCODE"
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    h, err = _run_elevated("powershell.exe", f"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {enc}")
+    if not h:
+        return err
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    on_phase and on_phase("download")
+    last, still, phase = -1, 0, "download"
+    try:
+        while k32.WaitForSingleObject(h, 500) == 0x102:              # WAIT_TIMEOUT
+            if phase != "download":
+                continue
+            got = staged_bytes(pid)
+            still = still + 1 if got and got == last else 0
+            last = got
+            if still >= 6:
+                phase = "install"
+                on_phase and on_phase(phase)
+        code = ctypes.c_ulong()
+        k32.GetExitCodeProcess(h, ctypes.byref(code))
+        return _signed(code.value)
+    finally:
+        k32.CloseHandle(h)
+
+
+def upgrade(pid, on_phase=None, admin=False, machine=False):
     """Tek paketi sessizce güncelle. on_phase("download" | "install") aşama değişince. -> çıkış kodu.
 
     Çıktıda adres geçen satır ("Downloading https://…") indirmenin, ondan sonraki ilk satır
-    (kurulum dosyası doğrulandı) kurulumun başladığını gösterir."""
+    (kurulum dosyası doğrulandı) kurulumun başladığını gösterir. admin: yönetici olarak (izin sorulur)."""
     w = exe()
     if not w:
         return -1
-    args = [w, "upgrade", "--id", pid, "--exact", "--silent", "--include-unknown",
-            "--accept-package-agreements"] + AGREE
+    opts = ["upgrade", "--id", pid, "--exact", "--silent", "--include-unknown", "--accept-package-agreements"] + AGREE
     clear_staged(pid)
+    if admin:
+        return _upgrade_admin(w, opts, pid, on_phase, machine)
+    args = [w] + opts
     try:
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
     except OSError:

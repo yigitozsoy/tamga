@@ -37,7 +37,6 @@ class Bus(QObject):
     wg_size = pyqtSignal(str, str, int)
 
 
-WG_OK = (0, -1978335189)    # 0x8A15002B: uygulanabilir güncelleme yok (zaten güncel / daha yeni)
 
 
 def fmt_size(n):
@@ -354,7 +353,7 @@ class WgRow(QWidget):
         if (self.win.wg_jobs.get(pid) or {}).get("phase") == "queued":
             self.win.dequeue(pid)
         else:
-            self.win.update_pkg(pid)
+            self.win.update_pkg(pid, admin=self.win.wg_admin_able(pid))
 
     def _menu(self):
         it, w = self.item, self.win
@@ -379,7 +378,7 @@ class WgRow(QWidget):
         if hidden:
             parts.append(t("wg_ignored") if pid in (prefs.get("wg_ignore") or []) else t("wg_skipped"))
         elif pid in w.wg_failed:
-            parts.append(t("wg_failed"))
+            parts.append(t(w.wg_err_key(pid)))
             state = "err"
         self.status.setText("  ·  ".join(parts))
         self.status.setProperty("state", state)
@@ -389,6 +388,8 @@ class WgRow(QWidget):
         self.btn_menu.setText(t("wg_unhide") if hidden else t("wg_hide"))
         self.btn.setVisible(not hidden)
         self.btn.setToolTip("")
+        self.status.setToolTip(t("wg_code_tip", c=W.code_hex(w.wg_failed[pid][0]))
+                               if pid in w.wg_failed and not hidden else "")
         phase = job["phase"] if job else ""
         if phase == "queued":
             self.btn.setEnabled(True)
@@ -410,7 +411,9 @@ class WgRow(QWidget):
             self.bar.show()
         else:
             self.btn.setEnabled(True)
-            self.btn.setText(t("update"))
+            admin = w.wg_admin_able(pid)
+            self.btn.setText(t("wg_admin_try") if admin else t("update"))
+            self.btn.setToolTip(t("wg_admin_tip") if admin else "")
             self.bar.hide()
 
 
@@ -442,7 +445,7 @@ class MainWindow(QMainWindow):
         self.tab = 1 if prefs.get("tab") == 1 else 0
         self.wg = [x for x in (prefs.get("wg_upgrades") or []) if isinstance(x, dict) and x.get("id")]
         self.wg_err = ""
-        self.wg_jobs, self.wg_failed, self.wg_rows = {}, set(), {}
+        self.wg_jobs, self.wg_failed, self.wg_rows = {}, {}, {}      # wg_failed: kimlik -> (kod, yönetici miydi)
         self._wg_checking = False
         self._wg_q, self._wg_lock, self._wg_worker = [], threading.Lock(), False
         self.wg_sizes = {k: v for k, v in (prefs.get("wg_sizes") or {}).items() if isinstance(v, list) and len(v) == 2}
@@ -641,6 +644,11 @@ class MainWindow(QMainWindow):
         self.btn_rec.setToolTip(t("update_rec_tip"))
         self.btn_rec.clicked.connect(self.update_recommended)
         hrow.addWidget(self.btn_rec, 0, Qt.AlignmentFlag.AlignBottom)
+        self.btn_admin = QPushButton()
+        self.btn_admin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_admin.setToolTip(t("wg_admin_all_tip"))
+        self.btn_admin.clicked.connect(self.update_admin_all)
+        hrow.addWidget(self.btn_admin, 0, Qt.AlignmentFlag.AlignBottom)
         self.btn_all = QPushButton(t("update_all"))
         self.btn_all.setObjectName("Primary")
         self.btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -831,6 +839,9 @@ class MainWindow(QMainWindow):
         self.btn_all.setVisible(len(idle) > 1)
         rec = [x for x in idle if W.recommended(x["id"])]
         self.btn_rec.setVisible(bool(rec) and len(rec) < len(idle))
+        fixable = [x for x in idle if self.wg_admin_able(x["id"])]
+        self.btn_admin.setText(t("wg_admin_all", n=len(fixable)))
+        self.btn_admin.setVisible(len(fixable) > 1 and not self.wg_jobs)
 
     def _refresh_wg_status(self):
         vis = self.wg_visible()
@@ -914,7 +925,7 @@ class MainWindow(QMainWindow):
             ids = {r["id"] for r in rows}
             keep = [x for x in self.wg if x["id"] in self.wg_jobs and x["id"] not in ids]
             self.wg = rows + keep
-            self.wg_failed &= ids
+            self.wg_failed = {k: v for k, v in self.wg_failed.items() if k in ids}
             self.wg_summary = ""
             avail = {r["id"]: r.get("available") for r in rows}
             prefs.update({"wg_upgrades": self.wg, "wg_checked": 0 if err else time.time(),
@@ -925,15 +936,30 @@ class MainWindow(QMainWindow):
         self._fetch_sizes()
 
     # sırayla güncelleme
-    def update_pkg(self, pid):
+    def wg_err_key(self, pid):
+        code, admin = self.wg_failed[pid]
+        r = W.reason(code)
+        return "wg_err_admin_fail" if admin and r in ("fail", "admin") else "wg_err_" + r
+
+    def wg_admin_able(self, pid):
+        """Güncellenemedi ve yönetici olarak denemek işe yarayabilir (açık uygulama, internet… değil)."""
+        f = self.wg_failed.get(pid)
+        return bool(f) and W.reason(f[0]) in ("fail", "admin", "denied")
+
+    def update_admin_all(self):
+        for x in self._ordered():
+            if not self.wg_hidden(x) and self.wg_admin_able(x["id"]):
+                self.update_pkg(x["id"], admin=True)
+
+    def update_pkg(self, pid, admin=False):
         if pid in self.wg_jobs:
             return
         if not self.wg_jobs:
             self.wg_batch = {"total": 0, "done": 0, "ok": 0, "fail": 0}
             self.wg_summary = ""
         self.wg_batch["total"] += 1
-        self.wg_failed.discard(pid)
-        self.wg_jobs[pid] = {"phase": "queued", "p": -1}
+        self.wg_failed.pop(pid, None)
+        self.wg_jobs[pid] = {"phase": "queued", "p": -1, "admin": admin}
         with self._wg_lock:
             self._wg_q.append(pid)
             start = not self._wg_worker
@@ -979,7 +1005,11 @@ class MainWindow(QMainWindow):
                     return
                 pid = self._wg_q.pop(0)
             self.bus.wg_phase.emit(pid, "start")
-            self.bus.wg_done.emit(pid, W.upgrade(pid, lambda ph, pid=pid: self.bus.wg_phase.emit(pid, ph)))
+            admin = bool((self.wg_jobs.get(pid) or {}).get("admin"))
+            name = next((x["name"] for x in list(self.wg) if x["id"] == pid), "")
+            machine = admin and W.machine_installed(name)
+            code = W.upgrade(pid, lambda ph, pid=pid: self.bus.wg_phase.emit(pid, ph), admin=admin, machine=machine)
+            self.bus.wg_done.emit(pid, code)
 
     def _on_wg_phase(self, pid, phase):
         job = self.wg_jobs.get(pid)
@@ -1025,18 +1055,18 @@ class MainWindow(QMainWindow):
         self._refresh_queue()
 
     def _on_wg_done(self, pid, code):
-        self.wg_jobs.pop(pid, None)
+        job = self.wg_jobs.pop(pid, None)
         if not any(j["phase"] in ("start", "download") for j in self.wg_jobs.values()):
             self.wg_tick.stop()
         b = self.wg_batch
         b["done"] += 1
-        if code in WG_OK:
+        if W.ok(code):
             b["ok"] += 1
             self.wg = [x for x in self.wg if x["id"] != pid]
             prefs.set("wg_upgrades", self.wg)
         else:
             b["fail"] += 1
-            self.wg_failed.add(pid)
+            self.wg_failed[pid] = (code, bool(job and job.get("admin")))
         if not self.wg_jobs and b["total"] > 1:
             s = [t("wg_done_ok", n=b["ok"])] if b["ok"] else []
             if b["fail"]:
