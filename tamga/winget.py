@@ -73,7 +73,9 @@ def parse_upgrades(text):
                 break
             cells = [row[a:b].strip() for a, b in zip(cols, cols[1:] + [None])]
             pid = cells[1]
-            if not pid or " " in pid:
+            # tablonun hemen altındaki "4 upgrades available." satırı da sütunlara düşer (adlar kısaysa "available."
+            # kimlik sütununa denk gelir): gerçek satırda sürüm ve yeni sürüm de dolu
+            if not pid or " " in pid or not cells[2] or not cells[3]:
                 continue
             out.append({"name": cells[0].rstrip("…").strip() or pid, "id": pid, "version": cells[2],
                         "available": cells[3], "source": cells[4] if len(cells) > 4 else ""})

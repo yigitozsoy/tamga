@@ -108,7 +108,12 @@ WG_TR = ("Ad            Kimlik            Sürüm    Kullanılabilir Kaynak\n"
          "Google Chrome Google.Chrome.EXE 131.0.1  132.0.2        winget\n")
 r = W.parse_upgrades(WG_TR)
 check("winget: Türkçe başlık", len(r) == 1 and r[0]["id"] == "Google.Chrome.EXE" and r[0]["available"] == "132.0.2")
-check("winget: güncelleme yoksa boş", W.parse_upgrades("No installed package found matching input criteria.") == [])
+r = W.parse_upgrades("Name         Id                         Version      Available    Source\n"
+                     "------------------------------------------------------------------------\n"
+                     "PdfCraft     ArtCraft.PdfCraft          0.14.0       0.22.0       winget\n"
+                     "4 upgrades available.\n")
+check("winget: kısa adlarda özet satırı satır sayılmaz", [x["id"] for x in r] == ["ArtCraft.PdfCraft"])
+check("winget: güncelleme yoksa boş",W.parse_upgrades("No installed package found matching input criteria.") == [])
 SHOW = ("Installer:\n  Installer Type: wix\n  Yükleyici URL'si: https://example.org/x/vlc-3.0.24-win64.msi\n"
         "  Installer SHA256: 22172095ce4c2d5f5b600bb4c142d78105db29a77fa59a931941876f3b20f6d0\n")
 check("winget show: kurulum adresi (dilden bağımsız)", W.parse_installer_url(SHOW) == "https://example.org/x/vlc-3.0.24-win64.msi"

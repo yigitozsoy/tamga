@@ -1,3 +1,3 @@
 """tamga — tamga ailesinin (erk, bediz, kamug, yazıt) başlatıcısı: kur, aç, güncelle, ortak ayarlar."""
-__version__ = "1.7"
+__version__ = "1.8"
 REPO = "yigitozsoy/tamga"
