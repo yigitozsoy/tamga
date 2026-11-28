@@ -41,5 +41,8 @@ packaging/            build.ps1, tamga.spec, installer.iss (AppId {FB53E9DE-E7AE
   runas ile bir kez açılan PowerShell, job.json / result.json ile sıradaki tüm paketleri kurar, `--scope machine`,
   uygun kurulum yoksa kapsamsız yeniden. HKCU'dakiler (Discord, Spotify: yönetici olarak kurulmayı reddeder) normal. Hata ayıklama: winget günlükleri
   `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
+- Yönetici sürecin %TEMP%'te OLUŞTURDUĞU dosyanın sahibi Administrators olur, normal tamga okuyamaz (Erişim engellendi;
+  1.6'da sıra sonsuza kadar "Kuruluyor…" kaldı). Sonuç / durum dosyasını tamga önceden açar, yönetici süreç yalnızca
+  içine yazar (`WriteAllText`, taşıma / yeniden adlandırma yok).
 - Sürüm notu: build.yml etiketlenen commit'in mesajını yayın gövdesi yapar; commit mesajını sürüm notu gibi yaz.
 - Test: `python tests/smoke_test.py` (LOCALAPPDATA ve TAMGA_DATA_DIR geçici klasöre, ağ sahte, pencere ekranda değil).

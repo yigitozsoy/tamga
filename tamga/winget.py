@@ -376,8 +376,7 @@ while ($true) {{
         if ($LASTEXITCODE -eq {no_app}) {{ & $w @a | Out-Null }}
       }} else {{ & $w @a | Out-Null }}
       $o = @{{ seq = $seq; code = $LASTEXITCODE }} | ConvertTo-Json -Compress
-      [IO.File]::WriteAllText("$res.tmp", $o)
-      Move-Item -LiteralPath "$res.tmp" -Destination $res -Force
+      [IO.File]::WriteAllText($res, $o)      # tamga'nın açtığı dosyanın içine: yeni dosya yönetici izinli olur, okunamaz
     }}
   }}
   Start-Sleep -Milliseconds 300
@@ -404,6 +403,9 @@ class AdminRunner:
             return -1
         self.dir = tempfile.mkdtemp(prefix="tamga-admin-")
         self.seq = 0
+        # yönetici sürecin oluşturduğu dosyayı normal kullanıcı okuyamaz: sonuç dosyasını önceden biz açarız,
+        # o yalnızca içine yazar (yarım okunursa read_json None döner, yeniden denenir)
+        open(os.path.join(self.dir, "result.json"), "w").close()
         script = _RUNNER.format(dir=ps_quote(self.dir), parent=os.getpid(), winget=ps_quote(w),
                                 no_app=_signed(NO_APPLICABLE))
         self.h, err = run_elevated_ps(script)
@@ -423,6 +425,12 @@ class AdminRunner:
         on_phase and on_phase("download")
         last, still, phase = -1, 0, "download"
         while True:
+            try:
+                open(res, "rb").close()
+            except PermissionError:
+                return -1                   # okunamıyorsa sonsuza kadar beklemek yerine hata
+            except OSError:
+                pass
             r = read_json(res)
             if isinstance(r, dict) and r.get("seq") == self.seq:
                 return int(r.get("code") or 0)

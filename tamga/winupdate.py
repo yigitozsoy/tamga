@@ -63,8 +63,7 @@ $ErrorActionPreference = 'Stop'
 $st = {status}; $res = @{{}}; $reboot = $false
 function Put($o) {{
   $o.results = $res; $o.reboot = $reboot
-  [IO.File]::WriteAllText("$st.tmp", ($o | ConvertTo-Json -Compress -Depth 4))
-  Move-Item -LiteralPath "$st.tmp" -Destination $st -Force
+  [IO.File]::WriteAllText($st, ($o | ConvertTo-Json -Compress -Depth 4))   # tamga'nın açtığı dosyanın içine
 }}
 try {{
   Put @{{ phase = 'search' }}
@@ -159,10 +158,8 @@ class Installer:
 
     def start(self, ids):
         self.status = os.path.join(tempfile.gettempdir(), f"tamga-wu-{os.getpid()}.json")
-        try:
-            os.remove(self.status)
-        except OSError:
-            pass
+        # yönetici sürecin oluşturduğu dosyayı normal kullanıcı okuyamaz: dosyayı biz açarız, o içine yazar
+        open(self.status, "w").close()
         script = _INSTALL.format(status=ps_quote(self.status), find=_find(ids))
         self.h, err = run_elevated_ps(script)
         return err
